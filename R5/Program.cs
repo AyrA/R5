@@ -138,6 +138,7 @@ namespace R5
                     if (!CanRecover(HeaderList))
                     {
                         Error.WriteLine("Join: Unable to recover. Can only recover one part, need CRC for recovery");
+                        Error.WriteLine("Join: Make sure you either have all parts, or the CRC file with at most one missing part.");
                         return RET.CANT_RECOVER;
                     }
                     using (var FS = File.Create(FileName))
@@ -193,6 +194,10 @@ namespace R5
                             var CH = CRC.Value;
                             CH.PartNumber = Missing;
                             var NewName = Path.Combine(Path.GetDirectoryName(CRC.Key), CH.FileName) + string.Format(".{0:000}", Missing);
+                            if(File.Exists(NewName))
+                            {
+                                throw new IOException($"{NewName} already exists");
+                            }
                             using (var REC = File.Create(NewName))
                             {
                                 CH.Serialize(REC);
@@ -259,6 +264,10 @@ namespace R5
                             try
                             {
                                 Error.WriteLine("Part Generator: Trying to recreate CRC");
+                                if (File.Exists(NewName))
+                                {
+                                    throw new IOException($"{NewName} already exists");
+                                }
                                 using (var CRC = File.Create(NewName))
                                 {
                                     H.Serialize(CRC);
