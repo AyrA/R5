@@ -65,6 +65,7 @@ namespace R5
         private static int Join(string DirName, string FileName)
         {
             string SourceFile = null;
+            //Check if directory name is a single file and adjust values as needed
             if (File.Exists(DirName))
             {
                 SourceFile = Path.GetFileName(DirName);
@@ -75,22 +76,24 @@ namespace R5
                 var FileList = new Dictionary<string, Header>();
                 if (SourceFile == null)
                 {
+                    Error.WriteLine("Header Collect: Auto detecting files with headers");
                     foreach (var F in Directory.EnumerateFiles(DirName))
                     {
                         var H = GetHeader(F);
                         if (H != null)
                         {
+                            Error.WriteLine("Header Collect: Detected header in {0}", Path.GetFileName(F));
                             FileList.Add(F, H);
                         }
                     }
                     if (FileList.Count == 0)
                     {
-                        Error.WriteLine("No files found with a valid header");
+                        Error.WriteLine("Header Collect: No files found with a valid header");
                         return RET.NOT_FOUND;
                     }
                     if (!FileList.All(m => m.Value.Id == FileList.First().Value.Id))
                     {
-                        Error.WriteLine("Multiple different headers found in the given directory. Please specify one file as input");
+                        Error.WriteLine("Header Collect: Multiple different headers found in the given directory. Please specify one file as input");
                         return RET.AMBIGUOUS;
                     }
                 }
@@ -99,22 +102,30 @@ namespace R5
                     var TestHeader = GetHeader(Path.Combine(DirName, SourceFile));
                     if (TestHeader == null)
                     {
-                        Error.WriteLine("The file contains no valid header");
+                        Error.WriteLine("Header Collect: The file contains no valid header");
                         return RET.NO_HEADER;
                     }
                     //Get all matching headers
                     foreach (var F in Directory.EnumerateFiles(DirName))
                     {
                         var H = GetHeader(F);
-                        if (H != null && H.Id == TestHeader.Id)
+                        if (H != null)
                         {
-                            FileList.Add(F, H);
+                            if (H != null && H.Id == TestHeader.Id)
+                            {
+                                Error.WriteLine("Header Collect: Adding Header ", TestHeader.PartNumber);
+                                FileList.Add(F, H);
+                            }
+                            else
+                            {
+                                Error.WriteLine("Header Collect: Ignoring header {0}", TestHeader.Id);
+                            }
                         }
                     }
                 }
                 if (!ValidateHeaders(FileList.Select(m => m.Value).ToArray()))
                 {
-                    Error.WriteLine("Too many corrupt headers");
+                    Error.WriteLine("Header Check: Too many corrupt headers");
                     return RET.INVALID_HEADER;
                 }
 
@@ -123,59 +134,171 @@ namespace R5
                 //Recover damaged part if needed
                 if (!HasAllParts(HeaderList))
                 {
+                    Error.WriteLine("Join: File list has missing part");
                     if (!CanRecover(HeaderList))
                     {
-                        Error.WriteLine("Unable to recover. Can only recover one part, need CRC for recovery");
+                        Error.WriteLine("Join: Unable to recover. Can only recover one part, need CRC for recovery");
                         return RET.CANT_RECOVER;
                     }
-                    BitArray BA = null;
-                    foreach (var F in FileList)
+                    using (var FS = File.Create(FileName))
                     {
-                        using (var FS = File.OpenRead(F.Key))
+                        long PosMissing = 0;
+                        var Missing = GetMissingId(HeaderList);
+                        var CRC = FileList.First(m => m.Value.PartNumber == 0);
+                        BitArray BA = new BitArray(GetFileContent(CRC.Key));
+                        Error.WriteLine("Join: Missing part is {0}", Missing);
+                        for (var i = 1; i <= CRC.Value.PartCount; i++)
                         {
-                            GetHeader(FS);
-                            byte[] Data = new byte[FS.Length - FS.Position];
-                            FS.Read(Data, 0, Data.Length);
-                            if (BA == null)
+                            var Current = FileList.FirstOrDefault(m => m.Value.PartNumber == i);
+
+                            if (i == Missing)
                             {
-                                BA = new BitArray(Data);
+                                Error.WriteLine("Join Part {0}: Writing dummy segment", i);
+                                //Write placeholder
+                                PosMissing = FS.Position;
+                                FS.Write(new byte[BA.Length / 8], 0, BA.Length / 8);
                             }
                             else
                             {
-                                BA.Xor(new BitArray(Data));
+                                Error.WriteLine("Join Part {0}: Writing file segment", i);
+                                var Content = GetFileContent(Current.Key);
+                                FS.Write(Content, 0, Content.Length);
+                                //BitArray needs equal length arrays
+                                //The missing bytes are set to zero, which is the same as when we split the file
+                                if (Content.Length < BA.Length / 8)
+                                {
+                                    Array.Resize(ref Content, BA.Length / 8);
+                                }
+                                BA.Xor(new BitArray(Content));
                             }
+                        }
+                        Error.WriteLine("Join Part {0}: Writing recovered segment", Missing);
+                        FS.Flush();
+                        FS.Position = PosMissing;
+                        byte[] Temp = new byte[BA.Length / 8];
+                        BA.CopyTo(Temp, 0);
+                        FS.Write(Temp, 0, Temp.Length);
+
+                        //Trim file if needed (might be too large if the last part was the recovered one)
+                        if (FS.Position > CRC.Value.FileSize)
+                        {
+                            FS.Flush();
+                            FS.Position = CRC.Value.FileSize;
+                            FS.SetLength(CRC.Value.FileSize);
+                        }
+
+                        try
+                        {
+                            Error.WriteLine("Part Generator: Trying to recreate part {0}", Missing);
+                            var CH = CRC.Value;
+                            CH.PartNumber = Missing;
+                            var NewName = Path.Combine(Path.GetDirectoryName(CRC.Key), CH.FileName) + string.Format(".{0:000}", Missing);
+                            using (var REC = File.Create(NewName))
+                            {
+                                CH.Serialize(REC);
+                                REC.Write(Temp, 0, Temp.Length);
+                            }
+                            Error.WriteLine("Part Generator: Recreated part {0}", Missing);
+                        }
+                        catch (Exception ex)
+                        {
+                            Error.WriteLine("Part Generator: Unable to recreate part {0}", Missing);
+                            Error.WriteLine("Part Generator: {0}", ex.Message);
                         }
                     }
                 }
-
-                if (HasAllParts(HeaderList))
+                else
                 {
+                    var HasCRC = FileList.Any(m => m.Value.PartNumber == 0);
+                    Error.WriteLine("Join: File has all parts. Recovering normally");
+                    if (!HasCRC)
+                    {
+                        Error.WriteLine("Join: CRC missing, will generate again");
+                    }
                     //All parts here
                     var First = FileList.First(m => m.Value.PartNumber == 1).Value;
                     using (var FS = File.Create(FileName))
                     {
+                        BitArray BA = null;
                         for (var i = 1; i <= First.PartCount; i++)
                         {
-                            var CurrentHeader = FileList.First(m => m.Value.PartNumber == i);
-                            using (var IN = File.OpenRead(CurrentHeader.Key))
+                            Error.WriteLine("Join Part {0}: Writing file segment", i);
+                            byte[] Data = GetFileContent(FileList.First(m => m.Value.PartNumber == i).Key);
+                            FS.Write(Data, 0, Data.Length);
+                            if (!HasCRC)
                             {
-                                //Discard header
-                                Header.FromStream(IN);
-                                IN.CopyTo(FS);
+                                if (BA == null)
+                                {
+                                    BA = new BitArray(Data);
+                                }
+                                else
+                                {
+                                    if (Data.Length < BA.Length / 8)
+                                    {
+                                        Array.Resize(ref Data, BA.Length / 8);
+                                    }
+                                    BA.Xor(new BitArray(Data));
+                                }
                             }
                         }
-                        FS.Flush();
-                        FS.Position = First.FileSize;
-                        FS.SetLength(First.FileSize);
+                        //Trim file if needed
+                        if (FS.Position > First.FileSize)
+                        {
+                            FS.Flush();
+                            FS.Position = First.FileSize;
+                            FS.SetLength(First.FileSize);
+                        }
+                        //Recover CRC if needed
+                        if (BA != null)
+                        {
+                            
+                            var H = HeaderList.First();
+                            //Generate part name from existing Header
+                            var NewName = Path.Combine(Path.GetDirectoryName(FileName), H.FileName) + ".crc";
+                            H.PartNumber = 0;
+                            try
+                            {
+                                Error.WriteLine("Part Generator: Trying to recreate CRC");
+                                using (var CRC = File.Create(NewName))
+                                {
+                                    H.Serialize(CRC);
+                                    byte[] Data = new byte[BA.Length / 8];
+                                    BA.CopyTo(Data, 0);
+                                    CRC.Write(Data, 0, Data.Length);
+                                }
+                                Error.WriteLine("Part Generator: Recreated CRC");
+                            }
+                            catch(Exception ex)
+                            {
+                                Error.WriteLine("Part Generator: Unable to recreate CRC");
+                                Error.WriteLine("Part Generator: {0}", ex.Message);
+                            }
+                        }
                     }
                 }
             }
             else
             {
-                Error.WriteLine("Directory not found: {0}", DirName);
+                Error.WriteLine("Header Collect: Directory not found: {0}", DirName);
                 return RET.NOT_FOUND;
             }
             return RET.SUCCESS;
+        }
+
+        private static byte[] GetFileContent(string FileName)
+        {
+            using (var FS = File.OpenRead(FileName))
+            {
+                if (GetHeader(FS) == null)
+                {
+                    throw new InvalidDataException($"{FileName} has no header");
+                }
+                using (var MS = new MemoryStream())
+                {
+                    FS.CopyTo(MS);
+                    return MS.ToArray();
+                }
+            }
         }
 
         private static bool CanRecover(Header[] H)
