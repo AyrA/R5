@@ -123,9 +123,10 @@ namespace R5
                         }
                     }
                 }
+                //TODO: Remove duplicate headers in case the user accidentally copied some header twice
                 if (!ValidateHeaders(FileList.Select(m => m.Value).ToArray()))
                 {
-                    Error.WriteLine("Header Check: Too many corrupt headers");
+                    Error.WriteLine("Header Check: Detected duplicate/corrupt headers");
                     return RET.INVALID_HEADER;
                 }
 
@@ -194,7 +195,7 @@ namespace R5
                             var CH = CRC.Value;
                             CH.PartNumber = Missing;
                             var NewName = Path.Combine(Path.GetDirectoryName(CRC.Key), CH.FileName) + string.Format(".{0:000}", Missing);
-                            if(File.Exists(NewName))
+                            if (File.Exists(NewName))
                             {
                                 throw new IOException($"{NewName} already exists");
                             }
@@ -256,7 +257,7 @@ namespace R5
                         //Recover CRC if needed
                         if (BA != null)
                         {
-                            
+
                             var H = HeaderList.First();
                             //Generate part name from existing Header
                             var NewName = Path.Combine(Path.GetDirectoryName(FileName), H.FileName) + ".crc";
@@ -277,7 +278,7 @@ namespace R5
                                 }
                                 Error.WriteLine("Part Generator: Recreated CRC");
                             }
-                            catch(Exception ex)
+                            catch (Exception ex)
                             {
                                 Error.WriteLine("Part Generator: Unable to recreate CRC");
                                 Error.WriteLine("Part Generator: {0}", ex.Message);
@@ -348,11 +349,27 @@ namespace R5
 
         private static bool ValidateHeaders(Header[] H)
         {
-            return H.All(m => m.FileName == H[0].FileName) &&
+            return
+                //Currently not supported
+                !H[0].Encrypted &&
+
+                //Basic sanity checks
+                H[0].FileSize > 0 && //You can't split zero size files, can't you?
+                H[0].PartCount > 1 && //Splitting a file into 1 part is useless, so joining is too (CRC would be identical to file content)
+                H[0].Id != Guid.Empty && //Nullguid is not allowed
+                
+                //Validate all fields that are the same across all parts
+                H.All(m => m.FileName == H[0].FileName) &&
                 H.All(m => m.FileSize == H[0].FileSize) &&
                 H.All(m => m.Id == H[0].Id) &&
                 H.All(m => m.PartCount == H[0].PartCount) &&
-                H.All(m => m.Encrypted == H[0].Encrypted);
+                H.All(m => m.Encrypted == H[0].Encrypted) &&
+                
+                //Make sure each part appears at most once
+                H.All(m => H.Count(n => n.PartNumber == m.PartNumber) == 1) &&
+                
+                //Range check for part count (Valid = 0 <= PartNumber <= PartCount)
+                H.All(m => m.PartNumber >= 0 && m.PartNumber <= m.PartCount);
         }
 
         private static int Split(string FileName, string DirName, int PartCount)
@@ -430,7 +447,7 @@ namespace R5
                 }
                 else
                 {
-                    Error.WriteLine("Invalid number of parts, expecting 1-999 but got {0}", PartCount);
+                    Error.WriteLine("Invalid number of parts, expecting 2-999 but got {0}", PartCount);
                     return RET.INVALID_PART_COUNT;
                 }
             }

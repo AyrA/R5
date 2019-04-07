@@ -47,9 +47,13 @@ namespace R5
             {
                 throw new InvalidOperationException("Unable to serialize negative part numbers");
             }
-            if (PartCount < 1)
+            if (PartCount < 2)
             {
-                throw new InvalidOperationException("Unable to serialize 0 or less as part count");
+                throw new InvalidOperationException("Unable to serialize 1 or less as part count");
+            }
+            if (PartNumber > PartCount)
+            {
+                throw new InvalidOperationException("Unable to serialize out of range part number ");
             }
             if (Id == Guid.Empty)
             {
